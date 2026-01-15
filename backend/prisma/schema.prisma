@@ -1,0 +1,835 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Роли пользователей. Права описаны в middleware checkRole.
+enum Role {
+  DEVELOPER
+  DIRECTOR
+  DEPUTY
+  ADMIN
+  TEACHER
+  ACCOUNTANT
+  ZAVHOZ
+}
+
+// Права доступа для каждой роли
+model RolePermission {
+  id         Int      @id @default(autoincrement())
+  role       Role     @unique
+  modules    String[] // Список доступных модулей ["dashboard", "children", "employees", ...]
+  canCreate  Boolean  @default(true)
+  canEdit    Boolean  @default(true)
+  canDelete  Boolean  @default(true)
+  canExport  Boolean  @default(false)
+  customPermissions Json? // Дополнительные права в формате JSON
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+enum ChildStatus {
+  ACTIVE
+  LEFT
+}
+
+enum ClubEnrollmentStatus {
+  ACTIVE
+  WAITING_LIST
+  CANCELLED
+}
+
+enum FinanceType {
+  INCOME
+  EXPENSE
+}
+
+enum FinanceCategory {
+  NUTRITION
+  CLUBS
+  MAINTENANCE
+  SALARY
+}
+
+enum InventoryType {
+  FOOD       // Продукты питания
+  HOUSEHOLD  // Хоз. товары
+  STATIONERY // Канц. товары
+}
+
+/// Категория товара для заявок на выдачу
+enum ItemCategory {
+  STATIONERY  // Канц.товары
+  HOUSEHOLD   // Хоз.товары
+  OTHER       // Прочее
+}
+
+enum MaintenanceStatus {
+  PENDING      // Ожидает одобрения (показывается Директору/Завучу)
+  APPROVED     // Одобрена (показывается Завхозу)
+  REJECTED     // Отклонена
+  IN_PROGRESS  // В работе (у Завхоза)
+  DONE         // Выполнена
+}
+
+enum MaintenanceType {
+  REPAIR // Ремонт
+  ISSUE  // Выдача
+}
+
+enum FinanceSource {
+  BUDGET
+  EXTRA_BUDGET
+}
+
+enum SecurityEventType {
+  INCIDENT // Журнал происшествий
+  FIRE_CHECK // Проверка ПБ
+  VISITOR_LOG // Учёт посторонних
+  DOCUMENT // Документы по охране труда
+}
+
+enum EmployeeAttendanceStatus {
+  PRESENT
+  SICK_LEAVE
+  VACATION
+  ABSENT
+}
+
+enum AgeGroup {
+  INFANT // Ясли (0-3)
+  PRESCHOOL // Дошкольники (3-7)
+  ELEMENTARY // Младшая школа (7-11)
+}
+
+model User {
+  id             Int      @id @default(autoincrement())
+  email          String   @unique
+  passwordHash   String
+  role           Role
+  employeeId     Int      @unique
+  employee       Employee @relation(fields: [employeeId], references: [id])
+  telegramChatId String?  @unique // Telegram Chat ID для уведомлений
+
+  actionLogs ActionLog[]
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+}
+
+model Employee {
+  id                 Int       @id @default(autoincrement())
+  firstName          String
+  lastName           String
+  middleName         String?
+  birthDate          DateTime?
+  position           String
+  rate               Float // ставка (можно Decimal, если нужна точность)
+  hireDate           DateTime
+  fireDate           DateTime?
+  contractEndDate    DateTime?
+  medicalCheckupDate DateTime?
+  attestationDate    DateTime?
+
+  user                        User?
+  clubs                       Club[]               @relation("TeacherClubs")
+  classGroups                 Group[]              @relation("ClassTeacher")
+  maintenanceRequests         MaintenanceRequest[] @relation("Requester")
+  approvedMaintenanceRequests MaintenanceRequest[] @relation("Approver")
+  documents                   Document[]
+  attendance                  EmployeeAttendance[]
+  cleaningSchedules           CleaningSchedule[]
+  // LMS School relations
+  lmsScheduleItems            LmsScheduleItem[]
+  lmsGrades                   LmsGrade[]
+  lmsHomework                 LmsHomework[]
+  createdAt                   DateTime             @default(now())
+  updatedAt                   DateTime             @updatedAt
+}
+
+model Child {
+  id         Int         @id @default(autoincrement())
+  firstName  String
+  lastName   String
+  birthDate  DateTime
+  groupId    Int
+  group      Group       @relation(fields: [groupId], references: [id])
+  healthInfo Json? // { allergies: string[], specialConditions: string[] }
+  status     ChildStatus @default(ACTIVE)
+
+  enrollments       ClubEnrollment[]
+  attendance        Attendance[]
+  documents         Document[]
+  temporaryAbsences TemporaryAbsence[]
+  clubRatings       ClubRating[]
+  // LMS School relations
+  lmsSchoolStudents LmsSchoolStudent[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([groupId])
+}
+
+model Group {
+  id           Int       @id @default(autoincrement())
+  name         String    @unique // "1А", "2Б", "11В"
+  grade        Int? // 1-11 класс (null для совместимости с дошкольными группами)
+  academicYear String? // "2024-2025"
+  teacherId    Int? // Классный руководитель (Employee)
+  teacher      Employee? @relation("ClassTeacher", fields: [teacherId], references: [id])
+  capacity     Int       @default(30)
+  description  String?
+
+  children         Child[]
+  notifications    Notification[]
+  events           Event[]
+  // LMS relations
+  lmsStudents      LmsSchoolStudent[]
+  lmsScheduleItems LmsScheduleItem[]
+  lmsGrades        LmsGrade[]
+  lmsHomework      LmsHomework[]
+  lmsAttendance    LmsStudentAttendance[]
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  @@index([teacherId])
+}
+
+model Club {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  teacherId   Int
+  teacher     Employee @relation("TeacherClubs", fields: [teacherId], references: [id])
+  schedule    Json? // [{day: "Monday", time: "16:00"}]
+  cost        Decimal  @db.Decimal(12, 2)
+  maxStudents Int
+
+  enrollments         ClubEnrollment[]
+  attendance          Attendance[]
+  ratings             ClubRating[]
+  financeTransactions FinanceTransaction[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  @@unique([name, teacherId]) // Уникальность кружка по имени у конкретного педагога
+  @@index([teacherId])
+}
+
+model ClubEnrollment {
+  id      Int                  @id @default(autoincrement())
+  childId Int
+  clubId  Int
+  status  ClubEnrollmentStatus @default(ACTIVE)
+
+  child     Child    @relation(fields: [childId], references: [id])
+  club      Club     @relation(fields: [clubId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([childId, clubId]) // Один ребёнок — одна активная запись в кружок
+  @@index([clubId])
+  @@index([childId])
+}
+
+model Attendance {
+  id        Int      @id @default(autoincrement())
+  date      DateTime
+  childId   Int
+  clubId    Int? // null — посещаемость по основной группе (не кружок)
+  isPresent Boolean
+
+  child Child @relation(fields: [childId], references: [id])
+  club  Club? @relation(fields: [clubId], references: [id])
+
+  @@unique([date, childId, clubId]) // Уникальная отметка на дату/ребёнка/кружок
+  @@index([childId])
+  @@index([clubId])
+}
+
+model FinanceTransaction {
+  id          Int             @id @default(autoincrement())
+  amount      Decimal         @db.Decimal(14, 2)
+  type        FinanceType
+  category    FinanceCategory
+  source      FinanceSource   @default(BUDGET)
+  description String?
+  date        DateTime
+  documentUrl String?
+  clubId      Int?
+  club        Club?           @relation(fields: [clubId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([type, category, date])
+  @@index([clubId])
+}
+
+model InventoryItem {
+  id           Int           @id @default(autoincrement())
+  name         String
+  quantity     Float
+  unit         String // "кг", "шт", "л"
+  expiryDate   DateTime?
+  type         InventoryType
+  ingredientId Int?
+  ingredient   Ingredient?   @relation(fields: [ingredientId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([type, expiryDate])
+  @@index([ingredientId])
+}
+
+model Menu {
+  id       Int        @id @default(autoincrement())
+  date     DateTime
+  ageGroup AgeGroup
+  meals    MenuDish[] @relation("MenuMeals")
+
+  @@unique([date, ageGroup])
+  @@index([date])
+}
+
+model MaintenanceRequest {
+  id               Int               @id @default(autoincrement())
+  title            String            // Наименование
+  description      String?           // Описание (необязательно)
+  requesterId      Int
+  requester        Employee          @relation(fields: [requesterId], references: [id], name: "Requester")
+  status           MaintenanceStatus @default(PENDING)
+  type             MaintenanceType
+  
+  // Связь с позициями заявки (Master-Detail)
+  items            MaintenanceItem[]
+  
+  // Поля для workflow одобрения
+  approvedById     Int?
+  approvedBy       Employee?         @relation(fields: [approvedById], references: [id], name: "Approver")
+  approvedAt       DateTime?
+  rejectionReason  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([requesterId, status, type])
+  @@index([approvedById])
+}
+
+// Позиции заявки на выдачу (Detail таблица)
+model MaintenanceItem {
+  id         Int                @id @default(autoincrement())
+  requestId  Int
+  request    MaintenanceRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  name       String             // Наименование товара
+  quantity   Float              // Количество
+  unit       String             // Единица измерения (шт, кг, л)
+  category   ItemCategory       // Категория товара
+
+  createdAt  DateTime           @default(now())
+
+  @@index([requestId])
+}
+
+model SecurityLog {
+  id          Int               @id @default(autoincrement())
+  eventType   SecurityEventType
+  description String?
+  date        DateTime
+  documentUrl String?
+
+  createdAt DateTime @default(now())
+
+  @@index([date, eventType])
+}
+
+model ActionLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  action    String // "CREATE_CHILD" и т.п.
+  details   Json?
+  timestamp DateTime @default(now())
+
+  @@index([userId, action, timestamp])
+}
+
+// ============================================================================
+// НОВЫЕ МОДЕЛИ - Расширение функционала
+// ============================================================================
+
+// --- 1. КОНТИНГЕНТ ДЕТЕЙ ---
+model TemporaryAbsence {
+  id        Int      @id @default(autoincrement())
+  child     Child    @relation(fields: [childId], references: [id])
+  childId   Int
+  startDate DateTime
+  endDate   DateTime
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([childId])
+}
+
+// --- 2. УПРАВЛЕНИЕ ПЕРСОНАЛОМ ---
+model EmployeeAttendance {
+  id          Int                      @id @default(autoincrement())
+  employee    Employee                 @relation(fields: [employeeId], references: [id])
+  employeeId  Int
+  date        DateTime                 @db.Date
+  status      EmployeeAttendanceStatus
+  hoursWorked Float?
+  notes       String?
+
+  @@unique([employeeId, date])
+  @@index([employeeId, date])
+}
+
+model StaffingTable {
+  id           Int    @id @default(autoincrement())
+  position     String @unique // "Воспитатель", "Педагог"
+  requiredRate Float // Required staff rate (e.g., 1.5 воспитателя)
+}
+
+// --- 3. ПИТАНИЕ И ЗАКУПКИ ---
+model Ingredient {
+  id                 Int                 @id @default(autoincrement())
+  name               String              @unique
+  unit               String // "кг", "л", "шт"
+  calories           Float               @default(0) // per unit
+  protein            Float               @default(0) // per unit
+  fat                Float               @default(0) // per unit
+  carbs              Float               @default(0) // per unit
+  inventoryItems     InventoryItem[]
+  dishIngredients    DishIngredient[]
+  purchaseOrderItems PurchaseOrderItem[]
+}
+
+model Dish {
+  id              Int              @id @default(autoincrement())
+  name            String           @unique
+  category        String?
+  preparationTime Int? // minutes
+  ingredients     DishIngredient[]
+  menus           MenuDish[]
+}
+
+model DishIngredient {
+  dish         Dish       @relation(fields: [dishId], references: [id])
+  dishId       Int
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id])
+  ingredientId Int
+  quantity     Float // Кол-во на 1 порцию
+
+  @@id([dishId, ingredientId])
+}
+
+model MenuDish {
+  menu     Menu   @relation("MenuMeals", fields: [menuId], references: [id])
+  menuId   Int
+  dish     Dish   @relation(fields: [dishId], references: [id])
+  dishId   Int
+  mealType String // "Завтрак", "Обед", "Полдник", "Ужин"
+
+  @@id([menuId, dishId, mealType])
+}
+
+model Supplier {
+  id          Int             @id @default(autoincrement())
+  name        String          @unique
+  contactInfo String?
+  pricelist   Json? // { ingredientId: price }
+  orders      PurchaseOrder[]
+}
+
+model PurchaseOrder {
+  id           Int                 @id @default(autoincrement())
+  supplier     Supplier            @relation(fields: [supplierId], references: [id])
+  supplierId   Int
+  orderDate    DateTime
+  deliveryDate DateTime?
+  totalAmount  Decimal             @db.Decimal(10, 2)
+  status       String // "PENDING", "APPROVED", "DELIVERED"
+  items        PurchaseOrderItem[]
+  createdAt    DateTime            @default(now())
+
+  @@index([supplierId])
+}
+
+model PurchaseOrderItem {
+  id           Int           @id @default(autoincrement())
+  order        PurchaseOrder @relation(fields: [orderId], references: [id])
+  orderId      Int
+  ingredient   Ingredient    @relation(fields: [ingredientId], references: [id])
+  ingredientId Int
+  quantity     Float
+  price        Decimal       @db.Decimal(10, 2)
+
+  @@index([orderId])
+}
+
+// --- 4. КРУЖКИ ---
+model ClubRating {
+  id      Int     @id @default(autoincrement())
+  club    Club    @relation(fields: [clubId], references: [id])
+  clubId  Int
+  child   Child   @relation(fields: [childId], references: [id])
+  childId Int
+  rating  Int // 1-5
+  comment String?
+
+  @@unique([clubId, childId])
+}
+
+// --- 5. ХОЗЯЙСТВЕННЫЕ НУЖДЫ ---
+model CleaningSchedule {
+  id           Int           @id @default(autoincrement())
+  area         String // "Группа 1", "Кухня"
+  frequency    String // "Ежедневно", "Раз в неделю"
+  assignedTo   Employee?     @relation(fields: [assignedToId], references: [id])
+  assignedToId Int?
+  logs         CleaningLog[]
+}
+
+model CleaningLog {
+  id         Int              @id @default(autoincrement())
+  schedule   CleaningSchedule @relation(fields: [scheduleId], references: [id])
+  scheduleId Int
+  timestamp  DateTime         @default(now())
+
+  @@index([scheduleId])
+}
+
+model Equipment {
+  id          Int      @id @default(autoincrement())
+  name        String // "Огнетушитель #1"
+  location    String?
+  lastCheckup DateTime
+  nextCheckup DateTime
+
+  @@index([nextCheckup])
+}
+
+// --- 6. ДОКУМЕНТООБОРОТ ---
+model DocumentTemplate {
+  id        Int        @id @default(autoincrement())
+  name      String     @unique
+  content   String // Template content/URL
+  documents Document[]
+}
+
+model Document {
+  id         Int               @id @default(autoincrement())
+  name       String
+  fileUrl    String // URL/путь к скану
+  template   DocumentTemplate? @relation(fields: [templateId], references: [id])
+  templateId Int?
+  employee   Employee?         @relation(fields: [employeeId], references: [id])
+  employeeId Int?
+  child      Child?            @relation(fields: [childId], references: [id])
+  childId    Int?
+  createdAt  DateTime          @default(now())
+
+  @@index([employeeId])
+  @@index([childId])
+  @@index([templateId])
+}
+
+// --- 7. КОММУНИКАЦИИ ---
+model Notification {
+  id            Int      @id @default(autoincrement())
+  title         String
+  content       String
+  targetRole    Role? // Массовая рассылка по ролям
+  targetGroup   Group?   @relation(fields: [targetGroupId], references: [id])
+  targetGroupId Int? // Массовая рассылка по группам
+  createdAt     DateTime @default(now())
+
+  @@index([targetGroupId])
+}
+
+model Event {
+  id         Int      @id @default(autoincrement())
+  title      String   // Тема/название события
+  date       DateTime // Дата события
+  groupId    Int?     // Класс (опционально)
+  group      Group?   @relation(fields: [groupId], references: [id])
+  organizer  String   // Организатор
+  performers String[] // Исполнители (массив строк)
+  createdAt  DateTime @default(now())
+
+  @@index([date])
+  @@index([groupId])
+}
+
+model Feedback {
+  id          Int       @id @default(autoincrement())
+  parentName  String
+  contactInfo String
+  type        String // "Жалоба", "Предложение", "Обращение"
+  message     String
+  status      String // "NEW", "IN_PROGRESS", "RESOLVED"
+  response    String?
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, createdAt])
+}
+
+// --- 8. RAG / AI ASSISTANT ---
+model KnowledgeBaseDocument {
+  id        Int                         @id @default(autoincrement())
+  content   String                      @db.Text
+  metadata  Json? // { title, subject, grade, tags, source }
+  embedding Unsupported("vector(768)")?
+  createdAt DateTime                    @default(now())
+  updatedAt DateTime                    @updatedAt
+}
+
+// --- 9. СИСТЕМНЫЕ НАСТРОЙКИ ---
+// Персистентное хранение конфигураций (промты, API ключи, флаги)
+model SystemSetting {
+  id          Int      @id @default(autoincrement())
+  key         String   @unique // "ai_system_prompt", "maintenance_mode", etc.
+  value       String   @db.Text // Значение настройки (может быть JSON строкой)
+  description String? // Описание настройки
+  category    String   @default("general") // "ai", "security", "maintenance", "general"
+  isSecret    Boolean  @default(false) // Скрывать ли значение в API ответах
+  updatedBy   Int? // ID пользователя, изменившего настройку
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@index([key])
+}
+
+// --- 9. РАСПИСАНИЕ УРОКОВ ---
+
+// Предметы (дисциплины)
+model Subject {
+  id        Int            @id @default(autoincrement())
+  name      String         @unique // "Математика", "Русский язык"
+  shortName String? // "Мат", "Рус"
+  color     String? // Цвет для отображения в расписании "#4CAF50"
+  schedules ScheduleSlot[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+// Учебные кабинеты/помещения
+model Room {
+  id        Int            @id @default(autoincrement())
+  name      String         @unique // "Кабинет 101", "Спортзал"
+  capacity  Int? // Вместимость
+  schedules ScheduleSlot[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+// Временные слоты (звонки)
+model TimeSlot {
+  id        Int            @id @default(autoincrement())
+  number    Int // Номер урока (1, 2, 3...)
+  startTime String // "08:30"
+  endTime   String // "09:15"
+  schedules ScheduleSlot[]
+
+  @@unique([number])
+}
+
+// Привязка учителя к предмету (кто какие предметы ведёт)
+model TeacherSubject {
+  id         Int     @id @default(autoincrement())
+  employeeId Int
+  subjectId  Int
+  isPrimary  Boolean @default(false) // Основной предмет учителя
+
+  @@unique([employeeId, subjectId])
+  @@index([employeeId])
+  @@index([subjectId])
+}
+
+// Слоты расписания (конкретные уроки)
+model ScheduleSlot {
+  id         Int      @id @default(autoincrement())
+  dayOfWeek  Int // 1-7 (Пн-Вс)
+  timeSlotId Int
+  timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id])
+  groupId    Int // Класс
+  subjectId  Int
+  subject    Subject  @relation(fields: [subjectId], references: [id])
+  teacherId  Int // Учитель (employeeId)
+  roomId     Int?
+  room       Room?    @relation(fields: [roomId], references: [id])
+  isActive   Boolean  @default(true)
+  notes      String? // Примечания
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([dayOfWeek, timeSlotId, groupId]) // Один урок на слот для класса
+  @@index([teacherId])
+  @@index([groupId])
+  @@index([dayOfWeek])
+}
+
+// ============================================================================
+// ШКОЛЬНАЯ LMS - Расширенные модели
+// ============================================================================
+
+// Ученики школы (связь ребенка с классом для LMS)
+model LmsSchoolStudent {
+  id             String   @id @default(cuid())
+  studentId      Int // Child id
+  student        Child    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classId        Int // Group id (ERP класс)
+  class          Group    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  enrollmentDate DateTime @default(now())
+  status         String   @default("active") // active, graduated, transferred
+
+  grades              LmsGrade[]
+  attendance          LmsStudentAttendance[]
+  homeworkSubmissions LmsHomeworkSubmission[]
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+
+  @@unique([studentId, classId])
+}
+
+// Школьные предметы
+model LmsSubject {
+  id           String  @id @default(cuid())
+  erpSubjectId Int?    @unique // Связь с ERP Subject.id для синхронизации
+  name         String // "Математика", "Русский язык"
+  description  String?
+  grade        Int? // Для какого класса (null = для всех)
+  hoursPerWeek Int     @default(1)
+
+  schedules LmsScheduleItem[]
+  grades    LmsGrade[]
+  homework  LmsHomework[]
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+}
+
+// Расписание уроков
+model LmsScheduleItem {
+  id        String     @id @default(cuid())
+  classId   Int // Group id (ERP класс)
+  class     Group      @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subjectId String
+  subject   LmsSubject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  teacherId Int? // Employee id
+  teacher   Employee?  @relation(fields: [teacherId], references: [id], onDelete: SetNull)
+  dayOfWeek Int // 1-7 (понедельник-воскресенье)
+  startTime String // "08:30"
+  endTime   String // "09:15"
+  room      String? // "Кабинет 101"
+
+  attendance LmsStudentAttendance[]
+  createdAt  DateTime               @default(now())
+  updatedAt  DateTime               @updatedAt
+}
+
+// Журнал оценок
+model LmsGrade {
+  id        String           @id @default(cuid())
+  studentId String
+  student   LmsSchoolStudent @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId String
+  subject   LmsSubject       @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  classId   Int // Group id (ERP класс)
+  class     Group            @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId Int? // Employee id
+  teacher   Employee?        @relation(fields: [teacherId], references: [id], onDelete: SetNull)
+  value     Int // Оценка 1-5
+  maxValue  Int              @default(5)
+  gradeType String           @default("regular") // "regular", "test", "exam", "quarterly"
+  comment   String?
+  date      DateTime         @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([studentId])
+  @@index([subjectId])
+}
+
+// Домашние задания
+model LmsHomework {
+  id          String     @id @default(cuid())
+  title       String
+  description String?
+  subjectId   String
+  subject     LmsSubject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  classId     Int // Group id (ERP класс)
+  class       Group      @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId   Int // Employee id
+  teacher     Employee   @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  dueDate     DateTime
+  maxPoints   Int        @default(10)
+  status      String     @default("active") // active, archived
+
+  submissions LmsHomeworkSubmission[]
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+}
+
+// Сдача домашних заданий
+model LmsHomeworkSubmission {
+  id            String           @id @default(cuid())
+  homeworkId    String
+  homework      LmsHomework      @relation(fields: [homeworkId], references: [id], onDelete: Cascade)
+  studentId     String
+  student       LmsSchoolStudent @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  content       String?
+  attachmentUrl String?
+  submittedAt   DateTime         @default(now())
+  points        Int?
+  feedback      String?
+  gradedAt      DateTime?
+  gradedBy      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Посещаемость учеников
+model LmsStudentAttendance {
+  id             String           @id @default(cuid())
+  studentId      String
+  student        LmsSchoolStudent @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classId        Int // Group id (ERP класс)
+  class          Group            @relation(fields: [classId], references: [id], onDelete: Cascade)
+  scheduleItemId String?
+  scheduleItem   LmsScheduleItem? @relation(fields: [scheduleItemId], references: [id], onDelete: SetNull)
+  date           DateTime
+  status         String           @default("present") // present, absent, late, excused
+  note           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([studentId])
+  @@index([date])
+}
+
+// Объявления для класса
+model LmsClassAnnouncement {
+  id        Int       @id @default(autoincrement())
+  classId   Int? // null = для всей школы
+  title     String
+  content   String    @db.Text
+  authorId  Int // userId
+  isPinned  Boolean   @default(false)
+  expiresAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([classId])
+  @@index([authorId])
+}
